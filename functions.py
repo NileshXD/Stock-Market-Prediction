@@ -27,8 +27,8 @@ def calc_macd(data):
 def calc_bollinger(data, size):
         df = data.copy()
         df['sma'] = df['Close'].rolling(int(size)).mean()
-        df["bolu"] = df["sma"] + 2 * df['Adj Close'].rolling(int(size)).std(ddof=0)
-        df["bold"] = df["sma"] - 2 * df['Adj Close'].rolling(int(size)).std(ddof=0)
+        df["bolu"] = df["sma"] + 2 * df['Close'].rolling(int(size)).std(ddof=0)
+        df["bold"] = df["sma"] - 2 * df['Close'].rolling(int(size)).std(ddof=0)
         df["width"] = df["bolu"] - df["bold"]
         df.dropna(inplace=True)
         return df
@@ -39,8 +39,8 @@ def ATR(data, n):
         "function to calculate True Range and Average True Range"
         df = data.copy()
         df['H-L'] = abs(df['High'] - df['Low'])
-        df['H-PC'] = abs(df['High'] - df['Adj Close'].shift(1))
-        df['L-PC'] = abs(df['Low'] - df['Adj Close'].shift(1))
+        df['H-PC'] = abs(df['High'] - df['Close'].shift(1))
+        df['L-PC'] = abs(df['Low'] - df['Close'].shift(1))
         df['TR'] = df[['H-L', 'H-PC', 'L-PC']].max(axis=1, skipna=False)
         df['ATR'] = df['TR'].rolling(n).mean()
         df2 = df.drop(['H-L', 'H-PC', 'L-PC'], axis=1)
@@ -51,7 +51,7 @@ def ATR(data, n):
 def RSI(data, n):
         "function to calculate RSI"
         df = data.copy()
-        df['delta'] = df['Adj Close'] - df['Adj Close'].shift(1)
+        df['delta'] = df['Close'] - df['Close'].shift(1)
         df['gain'] = np.where(df['delta'] >= 0, df['delta'], 0)
         df['loss'] = np.where(df['delta'] < 0, abs(df['delta']), 0)
         avg_gain = []
