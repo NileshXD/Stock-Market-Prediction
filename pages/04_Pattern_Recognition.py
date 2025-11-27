@@ -67,7 +67,7 @@ if (show == 'Show'):
             fig.add_trace(
                 go.Scatter(
                     x=hist_price['Date'],
-                    y=hist_price['Adj Close'],
+                    y=hist_price['Close'],
                     name='Closing price'
                 )
             )
