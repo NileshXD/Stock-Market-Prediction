@@ -25,7 +25,7 @@ ticker = st.selectbox(
 )
 
 def load_price_data(ticker: str) -> pd.DataFrame:
-    """Download last 5 years of daily prices and clean columns."""
+    """Download last 5 years of data safely and handle empty/missing columns."""
     start = dt.datetime.today() - dt.timedelta(5 * 365)
     end = dt.datetime.today()
 
@@ -33,37 +33,50 @@ def load_price_data(ticker: str) -> pd.DataFrame:
         ticker,
         start=start,
         end=end,
-        auto_adjust=False,        # ensures Adj Close exists
-        group_by="column"         # prevents MultiIndex
+        auto_adjust=False,
+        group_by="column"
     )
 
-    # If MultiIndex → flatten
+    # ─────────────────────────────────────────────────────────
+    # 1️⃣ If dataframe empty → Stop immediately
+    # ─────────────────────────────────────────────────────────
+    if df is None or df.empty:
+        raise KeyError(f"No price data returned for ticker: {ticker}")
+
+    # ─────────────────────────────────────────────────────────
+    # 2️⃣ Flatten MultiIndex columns if present
+    # ─────────────────────────────────────────────────────────
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(-1)
 
-    # Safety: Ensure all columns exist
-    required_cols = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
+    # ─────────────────────────────────────────────────────────
+    # 3️⃣ Fix missing Close / Adj Close
+    # ─────────────────────────────────────────────────────────
 
-    # Case 1: Adj Close missing → create copy of Close
-    if "Adj Close" not in df.columns:
-        if "Close" in df.columns:
-            df["Adj Close"] = df["Close"]
-        else:
-            raise KeyError("Neither 'Adj Close' nor 'Close' exists in downloaded data.")
-
-    # Case 2: Close missing → create from Adj Close
+    # Create Close from Adj Close
     if "Close" not in df.columns:
-        df["Close"] = df["Adj Close"]
+        if "Adj Close" in df.columns:
+            df["Close"] = df["Adj Close"]
+        else:
+            # create synthetic Close
+            df["Close"] = np.nan
 
-    # FINAL CHECK
-    for col in required_cols:
+    # Create Adj Close from Close
+    if "Adj Close" not in df.columns:
+        df["Adj Close"] = df["Close"]
+
+    # ─────────────────────────────────────────────────────────
+    # 4️⃣ Final fallback for missing OHLC
+    # ─────────────────────────────────────────────────────────
+    for col in ["Open", "High", "Low", "Volume"]:
         if col not in df.columns:
-            df[col] = np.nan   # create empty fallback column
+            df[col] = np.nan
 
     df = df.reset_index()
     df["Date"] = pd.to_datetime(df["Date"]).dt.date
 
     return df
+
 
 
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
