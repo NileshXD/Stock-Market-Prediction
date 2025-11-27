@@ -1,46 +1,23 @@
+import streamlit as st
 import pandas as pd
 import numpy as np
-import yfinance as yf
-import streamlit as st
 import datetime as dt
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from sklearn.ensemble import RandomForestRegressor
+import yfinance as yf
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from millify import millify
-
-st.subheader('Next-Day Forecasting (RandomForest & Linear Regression)')
-
-csv = pd.read_csv('symbols.csv')
-symbol = csv['Symbol'].tolist()
-for i in range(len(symbol)):
-    symbol[i] = symbol[i] + ".NS"
-
-# Sidebar / selectbox
-ticker = st.selectbox(
-    'Enter or Choose NSE listed Stock Symbol',
-    symbol,
-    index=symbol.index('TRIDENT.NS')
-)
-
-def check_data_length(df, min_rows=200):
-    """Ensure dataset has enough rows to train ML models."""
-    if df is None or df.empty:
-        st.error("❌ No data returned for this ticker. Try another symbol.")
-        st.stop()
-
-    if len(df) < min_rows:
-        st.error(f"❌ Not enough data to train the forecasting model.\n"
-                 f"Required: {min_rows} rows\n"
-                 f"Found: {len(df)} rows\n\n"
-                 f"Try another ticker with longer history.")
-        st.stop()
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, r2_score
+import plotly.graph_objects as go
+import plotly.express as px
 
 
+# ---------------------------------------------------------
+# 1. SAFE DATA LOADER
+# ---------------------------------------------------------
 def load_price_data(ticker: str) -> pd.DataFrame:
-    """Download last 5 years of data safely and handle empty/missing columns."""
-    start = dt.datetime.today() - dt.timedelta(5 * 365)
+    """Download price data reliably with fallback handling."""
+    start = dt.datetime.today() - dt.timedelta(days=5 * 365)
     end = dt.datetime.today()
 
     df = yf.download(
@@ -51,186 +28,182 @@ def load_price_data(ticker: str) -> pd.DataFrame:
         group_by="column"
     )
 
-    # ─────────────────────────────────────────────────────────
-    # 1️⃣ If dataframe empty → Stop immediately
-    # ─────────────────────────────────────────────────────────
+    # Handle empty or None
     if df is None or df.empty:
-        raise KeyError(f"No price data returned for ticker: {ticker}")
+        st.error("❌ No data returned for this ticker. Try another one.")
+        st.stop()
 
-    # ─────────────────────────────────────────────────────────
-    # 2️⃣ Flatten MultiIndex columns if present
-    # ─────────────────────────────────────────────────────────
+    # Flatten MultiIndex columns
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(-1)
 
-    # ─────────────────────────────────────────────────────────
-    # 3️⃣ Fix missing Close / Adj Close
-    # ─────────────────────────────────────────────────────────
-
-    # Create Close from Adj Close
+    # Ensure Close exists
     if "Close" not in df.columns:
         if "Adj Close" in df.columns:
             df["Close"] = df["Adj Close"]
         else:
-            # create synthetic Close
-            df["Close"] = np.nan
+            st.error("❌ Price data does not contain Close/Adj Close.")
+            st.stop()
 
-    # Create Adj Close from Close
+    # Create Adj Close if missing
     if "Adj Close" not in df.columns:
         df["Adj Close"] = df["Close"]
 
-    # ─────────────────────────────────────────────────────────
-    # 4️⃣ Final fallback for missing OHLC
-    # ─────────────────────────────────────────────────────────
+    # Ensure OHLV exist
     for col in ["Open", "High", "Low", "Volume"]:
         if col not in df.columns:
             df[col] = np.nan
 
     df = df.reset_index()
-    df["Date"] = pd.to_datetime(df["Date"]).dt.date
-
     return df
 
 
-
+# ---------------------------------------------------------
+# 2. FEATURE ENGINEERING
+# ---------------------------------------------------------
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Create simple tabular features for next-day close prediction."""
-    data = df.copy()
-    data = data.sort_values("Date")
+    df = df.copy()
 
-    # Basic features
-    data["Return_1d"] = data["Close"].pct_change()
-    data["MA_5"] = data["Close"].rolling(window=5).mean()
-    data["MA_10"] = data["Close"].rolling(window=10).mean()
-    data["MA_20"] = data["Close"].rolling(window=20).mean()
-    data["Vol_5"] = data["Close"].rolling(window=5).std()
-    data["Vol_20"] = data["Close"].rolling(window=20).std()
+    # Daily returns
+    df["Return_1d"] = df["Close"].pct_change()
 
-    # Target: next day's Close
-    data["Target_Close_next"] = data["Close"].shift(-1)
+    # Technical indicators
+    df["SMA_10"] = df["Close"].rolling(10).mean()
+    df["SMA_20"] = df["Close"].rolling(20).mean()
+    df["EMA_10"] = df["Close"].ewm(span=10, adjust=False).mean()
 
-    data = data.dropna().reset_index(drop=True)
-    return data
+    # MACD
+    df["EMA_12"] = df["Close"].ewm(span=12, adjust=False).mean()
+    df["EMA_26"] = df["Close"].ewm(span=26, adjust=False).mean()
+    df["MACD"] = df["EMA_12"] - df["EMA_26"]
 
-def train_models(data: pd.DataFrame):
-    """Train RandomForest & LinearRegression on historical data."""
-    feature_cols = ["Close", "Return_1d", "MA_5", "MA_10", "MA_20", "Vol_5", "Vol_20"]
+    # RSI
+    delta = df["Close"].diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / (avg_loss + 1e-9)
+    df["RSI"] = 100 - (100 / (1 + rs))
 
-    X = data[feature_cols].values
-    y = data["Target_Close_next"].values
+    # Volatility
+    df["Volatility"] = df["Return_1d"].rolling(10).std()
 
-    # use last ~60 days as test set
-    test_size = min(60, len(data) // 5)
-    X_train, X_test = X[:-test_size], X[-test_size:]
-    y_train, y_test = y[:-test_size], y[-test_size:]
+    # Target: next-day close
+    df["Target"] = df["Close"].shift(-1)
 
-    rf = RandomForestRegressor(
-        n_estimators=300,
-        random_state=42,
-        n_jobs=-1
+    return df.dropna()
+
+
+# ---------------------------------------------------------
+# 3. CHECK IF ENOUGH DATA EXISTS
+# ---------------------------------------------------------
+def check_data(df, min_rows=150):
+    if df is None or df.empty or len(df) < min_rows:
+        st.error(
+            f"❌ Not enough data to train the model.\n"
+            f"Required: {min_rows} rows\nFound: {len(df)} rows"
+        )
+        st.stop()
+
+
+# ---------------------------------------------------------
+# 4. TRAIN MODELS
+# ---------------------------------------------------------
+def train_models(df):
+    X = df.drop(["Target", "Date"], axis=1, errors="ignore")
+    y = df["Target"]
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, shuffle=False
     )
-    rf.fit(X_train, y_train)
 
+    # Scale data
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
+    # Train models
     lr = LinearRegression()
-    lr.fit(X_train, y_train)
+    rf = RandomForestRegressor(n_estimators=200, random_state=42)
 
-    # predictions
-    rf_pred = rf.predict(X_test)
-    lr_pred = lr.predict(X_test)
+    lr.fit(X_train_scaled, y_train)
+    rf.fit(X_train_scaled, y_train)
 
-    metrics = {
-        "rf": {
-            "rmse": mean_squared_error(y_test, rf_pred, squared=False),
-            "mae": mean_absolute_error(y_test, rf_pred),
-            "r2": r2_score(y_test, rf_pred),
-            "y_pred": rf_pred,
-        },
-        "lr": {
-            "rmse": mean_squared_error(y_test, lr_pred, squared=False),
-            "mae": mean_absolute_error(y_test, lr_pred),
-            "r2": r2_score(y_test, lr_pred),
-            "y_pred": lr_pred,
-        },
-        "y_test": y_test,
-        "dates_test": data["Date"].iloc[-test_size:].values,
-        "feature_cols": feature_cols,
-        "rf_model": rf,
-        "lr_model": lr,
-    }
-    return metrics
+    # Predictions
+    lr_pred = lr.predict(X_test_scaled)
+    rf_pred = rf.predict(X_test_scaled)
 
-def forecast_next_day(models_info, latest_row: pd.Series):
-    """Use trained models to predict the next day's Close."""
-    feature_cols = models_info["feature_cols"]
-    X_next = latest_row[feature_cols].values.reshape(1, -1)
-
-    rf_pred = models_info["rf_model"].predict(X_next)[0]
-    lr_pred = models_info["lr_model"].predict(X_next)[0]
-    return rf_pred, lr_pred
-
-# === Main run ===
-df = load_price_data(ticker)
-
-# 1️⃣ Check raw data
-check_data_length(df, min_rows=200)
-
-feat_df = build_features(df)
-
-# 2️⃣ Check engineered data
-check_data_length(feat_df, min_rows=150)
-
-st.write(f"Using data from **{df['Date'].min()}** to **{df['Date'].max()}**.")
+    return lr, rf, scaler, X_test, y_test, lr_pred, rf_pred
 
 
+# ---------------------------------------------------------
+# 5. STREAMLIT UI
+# ---------------------------------------------------------
+st.title("📈 Next-Day Stock Price Forecasting (ML Version)")
 
-if len(feat_df) < 100:
-    st.error("Not enough data to train the forecasting models.")
-else:
-    models_info = train_models(feat_df)
+ticker = st.text_input("Enter Stock Ticker (ex: AAPL, RELIANCE.NS):", "AAPL")
 
-    # Metrics
-    st.markdown("### Model Performance (last ~60 days)")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("RandomForest RMSE", f"{models_info['rf']['rmse']:.2f}")
-    col2.metric("RandomForest MAE", f"{models_info['rf']['mae']:.2f}")
-    col3.metric("RandomForest R²", f"{models_info['rf']['r2']:.3f}")
+if st.button("Predict Next-Day Price"):
+    st.info("⏳ Fetching data…")
 
-    col4, col5, col6 = st.columns(3)
-    col4.metric("LinearReg RMSE", f"{models_info['lr']['rmse']:.2f}")
-    col5.metric("LinearReg MAE", f"{models_info['lr']['mae']:.2f}")
-    col6.metric("LinearReg R²", f"{models_info['lr']['r2']:.3f}")
+    df = load_price_data(ticker)
+    st.success("✔ Data Loaded")
 
-    # Plot actual vs predictions
-    dates_test = models_info["dates_test"]
-    y_test = models_info["y_test"]
-    rf_pred = models_info["rf"]["y_pred"]
-    lr_pred = models_info["lr"]["y_pred"]
+    st.info("⏳ Building features…")
+    feat_df = build_features(df)
+    check_data(feat_df)
 
-    fig = make_subplots(rows=1, cols=1)
-    fig.add_trace(
-        go.Scatter(x=dates_test, y=y_test, name="Actual Close")
-    )
-    fig.add_trace(
-        go.Scatter(x=dates_test, y=rf_pred, name="RF Predicted")
-    )
-    fig.add_trace(
-        go.Scatter(x=dates_test, y=lr_pred, name="LR Predicted")
-    )
-    fig.update_layout(
-        height=600,
-        title_text=f"Actual vs Predicted Next-Day Close: {ticker}",
-        xaxis_title="Date",
-        yaxis_title="Price"
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    st.success(f"✔ {len(feat_df)} rows ready for training")
 
-    # Next-day forecast
-    latest_row = feat_df.iloc[-1]
-    rf_next, lr_next = forecast_next_day(models_info, latest_row)
-    last_close = feat_df["Close"].iloc[-1]
+    st.info("⏳ Training Machine Learning models…")
+    lr, rf, scaler, X_test, y_test, lr_pred, rf_pred = train_models(feat_df)
+    st.success("✔ Models Trained")
 
-    st.markdown("### Next-Day Forecast")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Last Close", f"₹{millify(last_close, 2)}")
-    c2.metric("RF Next-Day Close", f"₹{millify(rf_next, 2)}")
-    c3.metric("LR Next-Day Close", f"₹{millify(lr_next, 2)}")
+    # -----------------------------------------------------
+    # DISPLAY METRICS
+    # -----------------------------------------------------
+    st.subheader("📊 Model Performance")
+
+    col1, col2 = st.columns(2)
+    col1.metric("Linear Regression RMSE", f"{np.sqrt(mean_squared_error(y_test, lr_pred)):.4f}")
+    col2.metric("Random Forest RMSE", f"{np.sqrt(mean_squared_error(y_test, rf_pred)):.4f}")
+
+    # -----------------------------------------------------
+    # NEXT-DAY PREDICTION
+    # -----------------------------------------------------
+    last_row = feat_df.drop(["Target", "Date"], axis=1).iloc[-1]
+    last_scaled = scaler.transform([last_row])
+
+    lr_next = lr.predict(last_scaled)[0]
+    rf_next = rf.predict(last_scaled)[0]
+
+    st.subheader("📌 Predicted Next-Day Closing Price")
+    st.metric("Random Forest Prediction", f"${rf_next:.2f}")
+    st.caption("Random Forest performs better than Linear Regression for non-linear markets.")
+
+    # -----------------------------------------------------
+    # FEATURE IMPORTANCE
+    # -----------------------------------------------------
+    st.subheader("📊 Feature Importance (Random Forest)")
+    fi = pd.DataFrame({
+        "Feature": feat_df.drop(["Target", "Date"], axis=1).columns,
+        "Importance": rf.feature_importances_
+    }).sort_values("Importance", ascending=False)
+
+    st.bar_chart(fi.set_index("Feature"))
+
+    # -----------------------------------------------------
+    # FORECAST VISUALIZATION
+    # -----------------------------------------------------
+    st.subheader("📈 Forecast vs Actual")
+
+    chart_df = pd.DataFrame({
+        "Actual": y_test.values,
+        "RF_Pred": rf_pred,
+        "LR_Pred": lr_pred
+    })
+
+    st.line_chart(chart_df)
+
+    st.success("🎉 Forecasting completed successfully!")
