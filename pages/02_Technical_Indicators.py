@@ -1,6 +1,5 @@
 from finta import TA
 import ta
-import talib
 from patterns import candlestick_patterns
 from functions import *
 import yfinance as yf
